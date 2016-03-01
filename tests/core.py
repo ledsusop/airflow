@@ -2,7 +2,6 @@ from __future__ import print_function
 
 import doctest
 import json
-import logging
 import os
 import re
 import unittest
@@ -21,14 +20,16 @@ from airflow.executors import SequentialExecutor, LocalExecutor
 from airflow.models import Variable
 
 configuration.test_mode()
-from airflow import jobs, models, DAG, utils, operators, hooks, macros, settings
+from airflow import jobs, models, DAG, utils, operators, hooks, macros, settings, exceptions
 from airflow.hooks import BaseHook
 from airflow.bin import cli
 from airflow.www import app as application
 from airflow.settings import Session
-from airflow.utils import LoggingMixin, round_time
+from airflow.utils.classes import State
+from airflow.utils.dates import round_time
+from airflow.utils.logging import LoggingMixin
 from lxml import html
-from airflow.utils import AirflowException
+from airflow.exceptions import AirflowException
 from airflow.configuration import AirflowConfigException
 from airflow.minihivecluster import MiniHiveCluster
 
@@ -213,7 +214,7 @@ class CoreTest(unittest.TestCase):
             dag_runs.append(dag_run)
 
             # Mark the DagRun as complete
-            dag_run.state = utils.State.SUCCESS
+            dag_run.state = State.SUCCESS
             session.merge(dag_run)
             session.commit()
 
@@ -408,7 +409,7 @@ class CoreTest(unittest.TestCase):
             python_callable=lambda: sleep(5),
             dag=self.dag)
         self.assertRaises(
-            utils.AirflowTaskTimeout,
+            exceptions.AirflowTaskTimeout,
             t.run,
             start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, force=True)
 
@@ -1187,7 +1188,7 @@ class WebHdfsSensorTest(unittest.TestCase):
 class ConnectionTest(unittest.TestCase):
     def setUp(self):
         configuration.test_mode()
-        utils.initdb()
+        utils.db.initdb()
         os.environ['AIRFLOW_CONN_TEST_URI'] = (
             'postgres://username:password@ec2.compute.com:5432/the_database')
         os.environ['AIRFLOW_CONN_TEST_URI_NO_CREDS'] = (
