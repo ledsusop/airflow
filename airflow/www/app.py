@@ -1,3 +1,18 @@
+# -*- coding: utf-8 -*-
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+import logging
 import socket
 
 from flask import Flask
@@ -9,7 +24,7 @@ import airflow
 from airflow import models
 from airflow.settings import Session
 
-from airflow.www.blueprints import ck, routes
+from airflow.www.blueprints import routes
 from airflow import jobs
 from airflow import settings
 from airflow import configuration
@@ -31,9 +46,10 @@ def create_app(config=None):
     cache = Cache(
         app=app, config={'CACHE_TYPE': 'filesystem', 'CACHE_DIR': '/tmp'})
 
-    app.register_blueprint(ck, url_prefix='/ck')
     app.register_blueprint(routes)
-    app.jinja_env.add_extension("chartkick.ext.charts")
+
+    log_format = airflow.settings.LOG_FORMAT_WITH_PID
+    airflow.settings.configure_logging(log_format=log_format)
 
     with app.app_context():
         from airflow.www import views
@@ -81,6 +97,8 @@ def create_app(config=None):
             base.MenuLink(category='Docs',
                 name='Github',url='https://github.com/airbnb/airflow'))
 
+        av(vs.VersionView(name='Version', category="About"))
+
         av(vs.DagRunModelView(
             models.DagRun, Session, name="DAG Runs", category="Browse"))
         av(vs.DagModelView(models.DagModel, Session, name=None))
@@ -92,10 +110,13 @@ def create_app(config=None):
             from airflow.plugins_manager import (
                 admin_views, flask_blueprints, menu_links)
             for v in admin_views:
+                logging.info('Adding view ' + v.name)
                 admin.add_view(v)
             for bp in flask_blueprints:
+                logging.info('Adding blueprint ' + bp.name)
                 app.register_blueprint(bp)
-            for ml in menu_links:
+            for ml in sorted(menu_links, key=lambda x: x.name):
+                logging.info('Adding menu link ' + ml.name)
                 admin.add_link(ml)
 
         integrate_plugins()
@@ -103,7 +124,7 @@ def create_app(config=None):
         @app.context_processor
         def jinja_globals():
             return {
-                'hostname': socket.gethostname(),
+                'hostname': socket.getfqdn(),
             }
 
         @app.teardown_appcontext
@@ -113,6 +134,8 @@ def create_app(config=None):
         return app
 
 app = None
+
+
 def cached_app(config=None):
     global app
     if not app:

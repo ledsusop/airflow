@@ -2,7 +2,7 @@
 .gitattributes
 .coverage
 .coveragerc
-.coveralls.yml
+.codecov.yml
 .rat-excludes
 requirements.txt
 .*log
@@ -18,3 +18,4 @@ metastore_db
 .*sql
 .*csv
 CHANGELOG.txt
+.*zip

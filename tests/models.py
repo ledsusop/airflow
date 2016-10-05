@@ -22,17 +22,23 @@ import os
 import unittest
 import time
 
-from airflow import models, AirflowException
+from airflow import models, settings, AirflowException
 from airflow.exceptions import AirflowSkipException
-from airflow.models import TaskInstance as TI
+from airflow.models import DAG, TaskInstance as TI
 from airflow.models import State as ST
-from airflow.operators import DummyOperator, BashOperator, PythonOperator
+from airflow.models import DagModel
+from airflow.operators.dummy_operator import DummyOperator
+from airflow.operators.bash_operator import BashOperator
+from airflow.operators.python_operator import PythonOperator
+from airflow.ti_deps.deps.trigger_rule_dep import TriggerRuleDep
 from airflow.utils.state import State
+from mock import patch
 from nose_parameterized import parameterized
 
 DEFAULT_DATE = datetime.datetime(2016, 1, 1)
 TEST_DAGS_FOLDER = os.path.join(
     os.path.dirname(os.path.realpath(__file__)), 'dags')
+
 
 class DagTest(unittest.TestCase):
 
@@ -64,6 +70,52 @@ class DagTest(unittest.TestCase):
         params_combined.update(params2)
         assert dag.params == params_combined
 
+    def test_dag_as_context_manager(self):
+        """
+        Test DAG as a context manager.
+
+        When used as a context manager, Operators are automatically added to
+        the DAG (unless they specifiy a different DAG)
+        """
+        dag = DAG(
+            'dag',
+            start_date=DEFAULT_DATE,
+            default_args={'owner': 'owner1'})
+        dag2 = DAG(
+            'dag2',
+            start_date=DEFAULT_DATE,
+            default_args={'owner': 'owner2'})
+
+        with dag:
+            op1 = DummyOperator(task_id='op1')
+            op2 = DummyOperator(task_id='op2', dag=dag2)
+
+        self.assertIs(op1.dag, dag)
+        self.assertEqual(op1.owner, 'owner1')
+        self.assertIs(op2.dag, dag2)
+        self.assertEqual(op2.owner, 'owner2')
+
+        with dag2:
+            op3 = DummyOperator(task_id='op3')
+
+        self.assertIs(op3.dag, dag2)
+        self.assertEqual(op3.owner, 'owner2')
+
+        with dag:
+            with dag2:
+                op4 = DummyOperator(task_id='op4')
+            op5 = DummyOperator(task_id='op5')
+
+        self.assertIs(op4.dag, dag2)
+        self.assertIs(op5.dag, dag)
+        self.assertEqual(op4.owner, 'owner2')
+        self.assertEqual(op5.owner, 'owner1')
+
+        with DAG('creating_dag_in_cm', start_date=DEFAULT_DATE) as dag:
+            DummyOperator(task_id='op6')
+
+        self.assertEqual(dag.dag_id, 'creating_dag_in_cm')
+        self.assertEqual(dag.tasks[0].task_id, 'op6')
 
 class DagRunTest(unittest.TestCase):
     def test_id_for_date(self):
@@ -113,14 +165,139 @@ class DagBagTest(unittest.TestCase):
         dagbag = models.DagBag(include_examples=True)
         assert dagbag.process_file(f.name) == []
 
+    def test_zip(self):
+        """
+        test the loading of a DAG within a zip file that includes dependencies
+        """
+        dagbag = models.DagBag()
+        dagbag.process_file(os.path.join(TEST_DAGS_FOLDER, "test_zip.zip"))
+        assert dagbag.get_dag("test_zip_dag")
+
+    @patch.object(DagModel,'get_current')
+    def test_get_dag_without_refresh(self, mock_dagmodel):
+        """
+        Test that, once a DAG is loaded, it doesn't get refreshed again if it
+        hasn't been expired.
+        """
+        dag_id = 'example_bash_operator'
+
+        mock_dagmodel.return_value = DagModel()
+        mock_dagmodel.return_value.last_expired = None
+        mock_dagmodel.return_value.fileloc = 'foo'
+
+        class TestDagBag(models.DagBag):
+            process_file_calls = 0
+            def process_file(self, filepath, only_if_updated=True, safe_mode=True):
+                if 'example_bash_operator.py' in filepath:
+                    TestDagBag.process_file_calls += 1
+                super(TestDagBag, self).process_file(filepath, only_if_updated, safe_mode)
+
+        dagbag = TestDagBag(include_examples=True)
+        processed_files = dagbag.process_file_calls
+
+        # Should not call process_file agani, since it's already loaded during init.
+        assert dagbag.process_file_calls == 1
+        assert dagbag.get_dag(dag_id) != None
+        assert dagbag.process_file_calls == 1
+
 
 class TaskInstanceTest(unittest.TestCase):
 
-    def test_run_pooling_task(self):
+    def test_set_dag(self):
+        """
+        Test assigning Operators to Dags, including deferred assignment
+        """
+        dag = DAG('dag', start_date=DEFAULT_DATE)
+        dag2 = DAG('dag2', start_date=DEFAULT_DATE)
+        op = DummyOperator(task_id='op_1', owner='test')
+
+        # no dag assigned
+        self.assertFalse(op.has_dag())
+        self.assertRaises(AirflowException, getattr, op, 'dag')
+
+        # no improper assignment
+        with self.assertRaises(TypeError):
+            op.dag = 1
+
+        op.dag = dag
+
+        # no reassignment
+        with self.assertRaises(AirflowException):
+            op.dag = dag2
+
+        # but assigning the same dag is ok
+        op.dag = dag
+
+        self.assertIs(op.dag, dag)
+        self.assertIn(op, dag.tasks)
+
+    def test_infer_dag(self):
+        dag = DAG('dag', start_date=DEFAULT_DATE)
+        dag2 = DAG('dag2', start_date=DEFAULT_DATE)
+
+        op1 = DummyOperator(task_id='test_op_1', owner='test')
+        op2 = DummyOperator(task_id='test_op_2', owner='test')
+        op3 = DummyOperator(task_id='test_op_3', owner='test', dag=dag)
+        op4 = DummyOperator(task_id='test_op_4', owner='test', dag=dag2)
+
+        # double check dags
+        self.assertEqual(
+            [i.has_dag() for i in [op1, op2, op3, op4]],
+            [False, False, True, True])
+
+        # can't combine operators with no dags
+        self.assertRaises(AirflowException, op1.set_downstream, op2)
+
+        # op2 should infer dag from op1
+        op1.dag = dag
+        op1.set_downstream(op2)
+        self.assertIs(op2.dag, dag)
+
+        # can't assign across multiple DAGs
+        self.assertRaises(AirflowException, op1.set_downstream, op4)
+        self.assertRaises(AirflowException, op1.set_downstream, [op3, op4])
+
+    def test_bitshift_compose_operators(self):
+        dag = DAG('dag', start_date=DEFAULT_DATE)
+        op1 = DummyOperator(task_id='test_op_1', owner='test')
+        op2 = DummyOperator(task_id='test_op_2', owner='test')
+        op3 = DummyOperator(task_id='test_op_3', owner='test')
+        op4 = DummyOperator(task_id='test_op_4', owner='test')
+        op5 = DummyOperator(task_id='test_op_5', owner='test')
+
+        # can't compose operators without dags
+        with self.assertRaises(AirflowException):
+            op1 >> op2
+
+        dag >> op1 >> op2 << op3
+
+        # make sure dag assignment carries through
+        # using __rrshift__
+        self.assertIs(op1.dag, dag)
+        self.assertIs(op2.dag, dag)
+        self.assertIs(op3.dag, dag)
+
+        # op2 should be downstream of both
+        self.assertIn(op2, op1.downstream_list)
+        self.assertIn(op2, op3.downstream_list)
+
+        # test dag assignment with __rlshift__
+        dag << op4
+        self.assertIs(op4.dag, dag)
+
+        # dag assignment with __rrshift__
+        dag >> op5
+        self.assertIs(op5.dag, dag)
+
+    @patch.object(TI, 'pool_full')
+    def test_run_pooling_task(self, mock_pool_full):
         """
         test that running task with mark_success param update task state as
         SUCCESS without running task.
         """
+        # Mock the pool out with a full pool because the pool doesn't actually exist
+        mock_pool_full.return_value = True
+
         dag = models.DAG(dag_id='test_run_pooling_task')
         task = DummyOperator(task_id='test_run_pooling_task_op', dag=dag,
                              pool='test_run_pooling_task_pool', owner='airflow',
@@ -130,11 +307,15 @@ class TaskInstanceTest(unittest.TestCase):
         ti.run()
         self.assertEqual(ti.state, models.State.QUEUED)
 
-    def test_run_pooling_task_with_mark_success(self):
+    @patch.object(TI, 'pool_full')
+    def test_run_pooling_task_with_mark_success(self, mock_pool_full):
         """
         test that running task with mark_success param update task state as SUCCESS
         without running task.
         """
+        # Mock the pool out with a full pool because the pool doesn't actually exist
+        mock_pool_full.return_value = True
+
         dag = models.DAG(dag_id='test_run_pooling_task_with_mark_success')
         task = DummyOperator(
             task_id='test_run_pooling_task_with_mark_success_op',
@@ -167,7 +348,6 @@ class TaskInstanceTest(unittest.TestCase):
             task=task, execution_date=datetime.datetime.now())
         ti.run()
         self.assertTrue(ti.state == models.State.SKIPPED)
-
 
     def test_retry_delay(self):
         """
@@ -206,10 +386,14 @@ class TaskInstanceTest(unittest.TestCase):
         run_with_error(ti)
         self.assertEqual(ti.state, State.FAILED)
 
-    def test_retry_handling(self):
+    @patch.object(TI, 'pool_full')
+    def test_retry_handling(self, mock_pool_full):
         """
         Test that task retries are handled properly
         """
+        # Mock the pool with a pool with slots open since the pool doesn't actually exist
+        mock_pool_full.return_value = False
+
         dag = models.DAG(dag_id='test_retry_handling')
         task = BashOperator(
             task_id='test_retry_handling_op',
@@ -239,6 +423,10 @@ class TaskInstanceTest(unittest.TestCase):
         self.assertEqual(ti.state, State.FAILED)
         self.assertEqual(ti.try_number, 2)
 
+        # Clear the TI state since you can't run a task with a FAILED state without
+        # clearing it first
+        ti.set_state(None, settings.Session())
+
         # third run -- up for retry
         run_with_error(ti)
         self.assertEqual(ti.state, State.UP_FOR_RETRY)
@@ -248,6 +436,38 @@ class TaskInstanceTest(unittest.TestCase):
         run_with_error(ti)
         self.assertEqual(ti.state, State.FAILED)
         self.assertEqual(ti.try_number, 4)
+
+    def test_next_retry_datetime(self):
+        delay = datetime.timedelta(seconds=3)
+        delay_squared = datetime.timedelta(seconds=9)
+        max_delay = datetime.timedelta(seconds=10)
+
+        dag = models.DAG(dag_id='fail_dag')
+        task = BashOperator(
+            task_id='task_with_exp_backoff_and_max_delay',
+            bash_command='exit 1',
+            retries=3,
+            retry_delay=delay,
+            retry_exponential_backoff=True,
+            max_retry_delay=max_delay,
+            dag=dag,
+            owner='airflow',
+            start_date=datetime.datetime(2016, 2, 1, 0, 0, 0))
+        ti = TI(
+            task=task, execution_date=datetime.datetime.now())
+        ti.end_date = datetime.datetime.now()
+
+        ti.try_number = 1
+        dt = ti.next_retry_datetime()
+        self.assertEqual(dt, ti.end_date+delay)
+
+        ti.try_number = 2
+        dt = ti.next_retry_datetime()
+        self.assertEqual(dt, ti.end_date+delay_squared)
+
+        ti.try_number = 3
+        dt = ti.next_retry_datetime()
+        self.assertEqual(dt, ti.end_date+max_delay)
 
     def test_depends_on_past(self):
         dagbag = models.DagBag()
@@ -330,11 +550,76 @@ class TaskInstanceTest(unittest.TestCase):
         run_date = task.start_date + datetime.timedelta(days=5)
 
         ti = TI(downstream, run_date)
-        completed = ti.evaluate_trigger_rule(
-            successes=successes, skipped=skipped, failed=failed,
-            upstream_failed=upstream_failed, done=done,
+        dep_results = TriggerRuleDep()._evaluate_trigger_rule(
+            ti=ti,
+            successes=successes,
+            skipped=skipped,
+            failed=failed,
+            upstream_failed=upstream_failed,
+            done=done,
             flag_upstream_failed=flag_upstream_failed)
+        completed = all([dep.passed for dep in dep_results])
 
         self.assertEqual(completed, expect_completed)
         self.assertEqual(ti.state, expect_state)
 
+    def test_xcom_pull_after_success(self):
+        """
+        tests xcom set/clear relative to a task in a 'success' rerun scenario
+        """
+        key = 'xcom_key'
+        value = 'xcom_value'
+
+        dag = models.DAG(dag_id='test_xcom', schedule_interval='@monthly')
+        task = DummyOperator(
+            task_id='test_xcom',
+            dag=dag,
+            pool='test_xcom',
+            owner='airflow',
+            start_date=datetime.datetime(2016, 6, 2, 0, 0, 0))
+        exec_date = datetime.datetime.now()
+        ti = TI(
+            task=task, execution_date=exec_date)
+        ti.run(mark_success=True)
+        ti.xcom_push(key=key, value=value)
+        self.assertEqual(ti.xcom_pull(task_ids='test_xcom', key=key), value)
+        ti.run()
+        # The second run and assert is to handle AIRFLOW-131 (don't clear on
+        # prior success)
+        self.assertEqual(ti.xcom_pull(task_ids='test_xcom', key=key), value)
+
+    def test_xcom_pull_different_execution_date(self):
+        """
+        tests xcom fetch behavior with different execution dates, using
+        both xcom_pull with "include_prior_dates" and without
+        """
+        key = 'xcom_key'
+        value = 'xcom_value'
+
+        dag = models.DAG(dag_id='test_xcom', schedule_interval='@monthly')
+        task = DummyOperator(
+            task_id='test_xcom',
+            dag=dag,
+            pool='test_xcom',
+            owner='airflow',
+            start_date=datetime.datetime(2016, 6, 2, 0, 0, 0))
+        exec_date = datetime.datetime.now()
+        ti = TI(
+            task=task, execution_date=exec_date)
+        ti.run(mark_success=True)
+        ti.xcom_push(key=key, value=value)
+        self.assertEqual(ti.xcom_pull(task_ids='test_xcom', key=key), value)
+        ti.run()
+        exec_date += datetime.timedelta(days=1)
+        ti = TI(
+            task=task, execution_date=exec_date)
+        ti.run()
+        # We have set a new execution date (and did not pass in
+        # 'include_prior_dates'which means this task should now have a cleared
+        # xcom value
+        self.assertEqual(ti.xcom_pull(task_ids='test_xcom', key=key), None)
+        # We *should* get a value using 'include_prior_dates'
+        self.assertEqual(ti.xcom_pull(task_ids='test_xcom',
+                                      key=key,
+                                      include_prior_dates=True),
+                         value)

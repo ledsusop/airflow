@@ -4,6 +4,8 @@ Configuration
 Setting up the sandbox in the :doc:`start` section was easy;
 building a production-grade environment requires a bit more work!
 
+.. _setting-options:
+
 Setting Configuration Options
 '''''''''''''''''''''''''''''
 
@@ -107,7 +109,7 @@ Here are a few imperative requirements for your workers:
   ``MySqlOperator``, the required Python library needs to be available in
   the ``PYTHONPATH`` somehow
 - The worker needs to have access to its ``DAGS_FOLDER``, and you need to
-  synchronize the filesystems by your own mean. A common setup would be to
+  synchronize the filesystems by your own means. A common setup would be to
   store your DAGS_FOLDER in a Git repository and sync it across machines using
   Chef, Puppet, Ansible, or whatever you use to configure machines in your
   environment. If all your boxes have a common mount point, having your
@@ -228,3 +230,20 @@ integrated with upstart
 .. code-block:: bash
 
     initctl airflow-webserver status
+
+Test Mode
+'''''''''
+Airflow has a fixed set of "test mode" configuration options. You can load these
+at any time by calling ``airflow.configuration.load_test_config()`` (note this
+operation is not reversible!). However, some options (like the DAG_FOLDER) are
+loaded before you have a chance to call load_test_config(). In order to eagerly load
+the test configuration, set test_mode in airflow.cfg:
+
+.. code-block:: bash
+
+  [tests]
+  unit_test_mode = True
+
+Due to Airflow's automatic environment variable expansion (see :ref:`setting-options`),
+you can also set the env var ``AIRFLOW__CORE__UNIT_TEST_MODE`` to temporarily overwrite
+airflow.cfg.

@@ -1,3 +1,17 @@
+# -*- coding: utf-8 -*-
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 from builtins import bytes
 import logging
@@ -17,6 +31,9 @@ class BashOperator(BaseOperator):
     :param bash_command: The command, set of commands or reference to a
         bash script (must be '.sh') to be executed.
     :type bash_command: string
+    :param xcom_push: If xcom_push is True, the last line written to stdout
+        will also be pushed to an XCom when the bash command completes.
+    :type xcom_push: bool
     :param env: If env is not None, it must be a mapping that defines the
         environment variables for the new process; these are used instead
         of inheriting the current process environment, which is the default
@@ -36,10 +53,7 @@ class BashOperator(BaseOperator):
             env=None,
             output_encoding='utf-8',
             *args, **kwargs):
-        """
-        If xcom_push is True, the last line written to stdout will also
-        be pushed to an XCom when the bash command completes.
-        """
+
         super(BashOperator, self).__init__(*args, **kwargs)
         self.bash_command = bash_command
         self.env = env

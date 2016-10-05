@@ -17,6 +17,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+from datetime import datetime
 from functools import wraps
 import logging
 import os
@@ -81,6 +82,22 @@ def merge_conn(conn, session=None):
     if not session.query(C).filter(C.conn_id == conn.conn_id).first():
         session.add(conn)
         session.commit()
+
+
+@event.listens_for(settings.engine, "connect")
+def connect(dbapi_connection, connection_record):
+    connection_record.info['pid'] = os.getpid()
+
+
+@event.listens_for(settings.engine, "checkout")
+def checkout(dbapi_connection, connection_record, connection_proxy):
+    pid = os.getpid()
+    if connection_record.info['pid'] != pid:
+        connection_record.connection = connection_proxy.connection = None
+        raise exc.DisconnectionError(
+            "Connection record belongs to pid {}, "
+            "attempting to check out in pid {}".format(connection_record.info['pid'], pid)
+        )
 
 
 def initdb():
@@ -166,6 +183,61 @@ def initdb():
         models.Connection(
             conn_id='ssh_default', conn_type='ssh',
             host='localhost'))
+    merge_conn(
+        models.Connection(
+            conn_id='fs_default', conn_type='fs',
+            extra='{"path": "/"}'))
+    merge_conn(
+        models.Connection(
+            conn_id='aws_default', conn_type='aws',
+            extra='{"region_name": "us-east-1"}'))
+    merge_conn(
+        models.Connection(
+            conn_id='emr_default', conn_type='emr',
+            extra='''
+                {   "Name": "default_job_flow_name",
+                    "LogUri": "s3://my-emr-log-bucket/default_job_flow_location",
+                    "ReleaseLabel": "emr-4.6.0",
+                    "Instances": {
+                        "InstanceGroups": [
+                            {
+                                "Name": "Master nodes",
+                                "Market": "ON_DEMAND",
+                                "InstanceRole": "MASTER",
+                                "InstanceType": "r3.2xlarge",
+                                "InstanceCount": 1
+                            },
+                            {
+                                "Name": "Slave nodes",
+                                "Market": "ON_DEMAND",
+                                "InstanceRole": "CORE",
+                                "InstanceType": "r3.2xlarge",
+                                "InstanceCount": 1
+                            }
+                        ]
+                    },
+                    "Ec2KeyName": "mykey",
+                    "KeepJobFlowAliveWhenNoSteps": false,
+                    "TerminationProtected": false,
+                    "Ec2SubnetId": "somesubnet",
+                    "Applications":[
+                        { "Name": "Spark" }
+                    ],
+                    "VisibleToAllUsers": true,
+                    "JobFlowRole": "EMR_EC2_DefaultRole",
+                    "ServiceRole": "EMR_DefaultRole",
+                    "Tags": [
+                        {
+                            "Key": "app",
+                            "Value": "analytics"
+                        },
+                        {
+                            "Key": "environment",
+                            "Value": "development"
+                        }
+                    ]
+                }
+            '''))
 
     # Known event types
     KET = models.KnownEventType
@@ -181,7 +253,13 @@ def initdb():
         session.add(KET(know_event_type='Marketing Campaign'))
     session.commit()
 
-    models.DagBag(sync_to_db=True)
+    dagbag = models.DagBag()
+    # Save individual DAGs in the ORM
+    now = datetime.utcnow()
+    for dag in dagbag.dags.values():
+        models.DAG.sync_to_db(dag, dag.owner, now)
+    # Deactivate the unknown ones
+    models.DAG.deactivate_unknown_dags(dagbag.dags.keys())
 
     Chart = models.Chart
     chart_label = "Airflow task instance by type"

@@ -1,9 +1,23 @@
+# -*- coding: utf-8 -*-
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from builtins import str
 from past.builtins import basestring
 from datetime import datetime
 import numpy
 import logging
+import sys
 
 from airflow.hooks.base_hook import BaseHook
 from airflow.exceptions import AirflowException
@@ -42,11 +56,18 @@ class DbApiHook(BaseHook):
             username=db.login,
             schema=db.schema)
 
-
     def get_pandas_df(self, sql, parameters=None):
-        '''
+        """
         Executes the sql and returns a pandas dataframe
-        '''
+
+        :param sql: the sql statement to be executed (str) or a list of
+            sql statements to execute
+        :type sql: str or list
+        :param parameters: The parameters to render the SQL query with.
+        :type parameters: mapping or iterable
+        """
+        if sys.version_info[0] < 3:
+            sql = sql.encode('utf-8')
         import pandas.io.sql as psql
         conn = self.get_conn()
         df = psql.read_sql(sql, con=conn, params=parameters)
@@ -54,9 +75,17 @@ class DbApiHook(BaseHook):
         return df
 
     def get_records(self, sql, parameters=None):
-        '''
+        """
         Executes the sql and returns a set of records.
-        '''
+
+        :param sql: the sql statement to be executed (str) or a list of
+            sql statements to execute
+        :type sql: str or list
+        :param parameters: The parameters to render the SQL query with.
+        :type parameters: mapping or iterable
+        """
+        if sys.version_info[0] < 3:
+            sql = sql.encode('utf-8')
         conn = self.get_conn()
         cur = self.get_cursor()
         if parameters is not None:
@@ -69,9 +98,17 @@ class DbApiHook(BaseHook):
         return rows
 
     def get_first(self, sql, parameters=None):
-        '''
-        Executes the sql and returns a set of records.
-        '''
+        """
+        Executes the sql and returns the first resulting row.
+
+        :param sql: the sql statement to be executed (str) or a list of
+            sql statements to execute
+        :type sql: str or list
+        :param parameters: The parameters to render the SQL query with.
+        :type parameters: mapping or iterable
+        """
+        if sys.version_info[0] < 3:
+            sql = sql.encode('utf-8')
         conn = self.get_conn()
         cur = conn.cursor()
         if parameters is not None:
@@ -92,16 +129,23 @@ class DbApiHook(BaseHook):
         :param sql: the sql statement to be executed (str) or a list of
             sql statements to execute
         :type sql: str or list
+        :param autocommit: What to set the connection's autocommit setting to
+            before executing the query.
+        :type autocommit: bool
+        :param parameters: The parameters to render the SQL query with.
+        :type parameters: mapping or iterable
         """
         conn = self.get_conn()
         if isinstance(sql, basestring):
             sql = [sql]
 
         if self.supports_autocommit:
-           self.set_autocommit(conn, autocommit)
+            self.set_autocommit(conn, autocommit)
 
         cur = conn.cursor()
         for s in sql:
+            if sys.version_info[0] < 3:
+                s = s.encode('utf-8')
             logging.info(s)
             if parameters is not None:
                 cur.execute(s, parameters)
@@ -124,6 +168,16 @@ class DbApiHook(BaseHook):
         """
         A generic way to insert a set of tuples into a table,
         the whole set of inserts is treated as one transaction
+
+        :param table: Name of the target table
+        :type table: str
+        :param rows: The rows to insert into the table
+        :type rows: iterable of tuples
+        :param target_fields: The names of the columns to fill in the table
+        :type target_fields: iterable of strings
+        :param commit_every: The maximum number of rows to insert in one
+            transaction. Set to 0 to insert all rows in one transaction.
+        :type commit_every: int
         """
         if target_fields:
             target_fields = ", ".join(target_fields)
@@ -147,7 +201,7 @@ class DbApiHook(BaseHook):
                 target_fields,
                 ",".join(values))
             cur.execute(sql)
-            if i % commit_every == 0:
+            if commit_every and i % commit_every == 0:
                 conn.commit()
                 logging.info(
                     "Loaded {i} into {table} rows so far".format(**locals()))
@@ -170,8 +224,24 @@ class DbApiHook(BaseHook):
         else:
             return str(cell)
 
+    def bulk_dump(self, table, tmp_file):
+        """
+        Dumps a database table into a tab-delimited file
+
+        :param table: The name of the source table
+        :type table: str
+        :param tmp_file: The path of the target file
+        :type tmp_file: str
+        """
+        raise NotImplementedError()
+
     def bulk_load(self, table, tmp_file):
         """
         Loads a tab-delimited file into a database table
+
+        :param table: The name of the target table
+        :type table: str
+        :param tmp_file: The path of the file to load into the table
+        :type tmp_file: str
         """
         raise NotImplementedError()
